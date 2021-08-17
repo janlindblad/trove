@@ -9,6 +9,119 @@ import sys, os, getopt
 class Trove:
   inmarker  = "<<<<in"
   outmarker = ">>>>out"
+
+  def __init__(self):
+    self.expansions = []
+    self.debug = False
+
+  def add_expansion(self, exp):
+    self.expansions += [exp]
+
+  def expand_match(self, message, lineno=0):
+    if self.debug: print(f"*** expand_match({message if lineno else message.get('type')}, {lineno})")
+    # %edit-config
+    # %edit-config;/sr/traffic-engineering
+    def match_one_exp(exp, message):
+      def match_one_cmd(cmd, message):
+
+        def match_path(req_path, line):
+          if self.debug: print(f"*** match_path({req_path}, {line}) {self.tag_stack}")
+          for depth, tag in enumerate(req_path,2):
+            if tag != self.tag_stack.get(depth, None):
+              if self.debug: print(f"*** match_path() False {depth}: {tag} in {req_path} vs. {self.tag_stack}")
+              return False
+          if self.debug: print(f"*** match_path() True {depth}: {tag} in {req_path} vs. {self.tag_stack}")
+          return True
+
+        def get_tag_depth(s):
+          def count_leading_spaces(s):
+            for n,c in enumerate(s,0):
+              if c != " ":
+                return n
+            return len(s)
+          def count_identifier_chars(s):
+            for n,c in enumerate(s,0):
+              if c in " />":
+                return n
+            return len(s)
+          leading_spaces = count_leading_spaces(s)
+          if not s[leading_spaces:].startswith("<"):
+            return (None, None)
+          if s[leading_spaces+1:].startswith("/"):
+            word = s[leading_spaces+2:]
+          else:
+            word = s[leading_spaces+1:]
+          word_len = count_identifier_chars(word)
+          word = word[:word_len]
+          return (word, leading_spaces // 2)
+
+        if not cmd:
+          return True
+        cmd, arg = cmd[0], cmd[1:]
+        if lineno:
+          (tag, depth) = get_tag_depth(message)
+          if tag and depth:
+            self.tag_stack[depth] = tag
+          if cmd == '^': # top N levels
+            if depth > int(arg):
+              return False
+          elif cmd == '#': # line number <= than this
+            if lineno > int(arg):
+              return False
+          elif cmd == '!': # invert match
+            res = match_one_cmd(arg, message)
+            if self.debug: print(f"*** match_one(1) inverting result {res}")
+            if res == None:
+              return None
+            return not res
+          elif cmd == '/': # path match
+            res = match_path(arg.split("/"), message)
+            if self.debug: print(f"*** match_one(1) match path {arg} result {res}")
+            return res
+          elif cmd in "%": # Filter commands
+            return None
+          else:
+            if self.debug: print(f"*** match_one(1) filter unknown {cmd}{arg}")
+            return False
+        else:
+          self.tag_stack = {}
+          if cmd == '%': # operation type, e.g. edit-config, hello, EOF
+            if arg not in message.get('type',''):
+              if self.debug: print(f"*** match_one(0) False: {arg} not in {message.get('type','')}")
+              return False
+          elif cmd == '!': # invert match
+            res = match_one_cmd(arg, message)
+            if self.debug: print(f"*** match_one(0) inverting result {res}")
+            if res == None:
+              return None
+            return not res
+          elif cmd in "#/^": # Filter commands
+            return None
+          else:
+            if self.debug: print(f"*** match_one(0) cmd unknown {cmd}{arg}")
+            return False
+        return True
+
+      conditions = exp.split(";")
+      for cond in conditions:
+        if self.debug: print(f"*** match_one() condition {cond}")
+        res = match_one_cmd(cond, message)
+        if res == None:
+          continue
+        if not res:
+          if self.debug: print(f"*** match_one() False: condition failed")
+          return False
+      if self.debug: print(f"*** match_one() True: all conditions matched")
+      return True
+
+    for e in self.expansions:
+      if self.debug: print(f"*** expand_match() testing {e} vs. {message if lineno else message.get('type','')}")
+      if match_one_exp(e, message):
+        if self.debug: print(f"*** expand_match() False")
+        return True
+    if self.debug: print(f"*** expand_match() True")
+    return False
+
   def print_trace_overview(self, trace_file_name):
     with open(trace_file_name, "r") as f:
       trace_text = f.read()
@@ -21,6 +134,11 @@ class Trove:
       if m.get('close'): mtype = 'CLOSED ' + mtype
       if m.get('eof'): mtype = 'EOF ' + mtype
       print(f"""{mnum:3} {m['line-start']:4}+{m['length']:>5} {m['time']} {m.get('direction')} {m.get('message-id','')} {mtype}""")
+      if self.expand_match(m):
+        for lineno,line in enumerate(m.get('body',[]),1):
+          if self.expand_match(line,lineno=lineno):
+            print(f"""       {lineno:10}:  {line}""")
+
 
   def generate_trace_overview(self, trace_text):
     overview = []
@@ -125,8 +243,8 @@ class Trove:
     verbosity = 0
     debug = False
     try:
-      opts, args = getopt.getopt(sys_argv[1:],"hd:v",
-        ["help", "debug=", "verbose"])
+      opts, args = getopt.getopt(sys_argv[1:],"hdve:",
+        ["help", "debug=", "verbose", "expand="])
     except getopt.GetoptError:
       usage(sys_argv)
       sys.exit(2)
@@ -135,7 +253,9 @@ class Trove:
         usage(sys_argv)
         sys.exit()
       elif opt in ("-d", "--debug"):
-        debug = True
+        self.debug = True
+      elif opt in ("-e", "--expand"):
+        self.add_expansion(arg)
       elif opt in ("-v", "--verbose"):
         verbosity += 1
       else:
