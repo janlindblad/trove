@@ -12,10 +12,14 @@ class Trove:
 
   def __init__(self):
     self.expansions = []
+    self.filters = []
     self.debug = False
 
-  def add_expansion(self, exp):
-    self.expansions += [exp]
+  def add_expansion(self, expr):
+    self.expansions += [expr]
+
+  def add_filter(self, expr):
+    self.filters += [expr]
 
   def expand_match(self, message, lineno=0):
     if self.debug: print(f"*** expand_match({message if lineno else message.get('type')}, {lineno})")
@@ -23,15 +27,29 @@ class Trove:
     # %edit-config;/sr/traffic-engineering
     def match_one_exp(exp, message):
       def match_one_cmd(cmd, message):
-
         def match_path(req_path, line):
-          if self.debug: print(f"*** match_path({req_path}, {line}) {self.tag_stack}")
-          for depth, tag in enumerate(req_path,2):
-            if tag != self.tag_stack.get(depth, None):
-              if self.debug: print(f"*** match_path() False {depth}: {tag} in {req_path} vs. {self.tag_stack}")
-              return False
-          if self.debug: print(f"*** match_path() True {depth}: {tag} in {req_path} vs. {self.tag_stack}")
-          return True
+          def match_path_startpos(req_path, start_position):
+            for depth, tag in enumerate(req_path,start_position):
+              if tag != self.tag_stack.get(depth, None):
+                if self.debug: print(f"*** match_path() False {depth}: {tag} in {req_path} vs. {self.tag_stack}")
+                return False
+            if self.debug: print(f"*** match_path() True {depth}: {tag} in {req_path} vs. {self.tag_stack}")
+            return True
+
+          # match_path()
+          if self.debug: pass
+          #print(f"*** match_path({req_path}, {line}) {self.tag_stack}")
+          if req_path[0] != '':
+            # Absolute path, starts with /
+            start_positions = [2]
+          else:
+            # Free floating path, starts with //
+            req_path = req_path[1:]
+            start_positions = range(2,100)
+          for start_position in start_positions:
+            if match_path_startpos(req_path, start_position):
+              return True
+          return False
 
         def get_tag_depth(s):
           def count_leading_spaces(s):
@@ -55,6 +73,7 @@ class Trove:
           word = word[:word_len]
           return (word, leading_spaces // 2)
 
+        # match_one_cmd()
         if not cmd:
           return True
         cmd, arg = cmd[0], cmd[1:]
@@ -62,11 +81,15 @@ class Trove:
           (tag, depth) = get_tag_depth(message)
           if tag and depth:
             self.tag_stack[depth] = tag
+            self.tag_stack[depth+1] = None
           if cmd == '^': # top N levels
-            if depth > int(arg):
+            if depth and depth > int(arg):
               return False
           elif cmd == '#': # line number <= than this
             if lineno > int(arg):
+              return False
+          elif cmd == '?': # line number <= than this
+            if arg not in message:
               return False
           elif cmd == '!': # invert match
             res = match_one_cmd(arg, message)
@@ -95,13 +118,14 @@ class Trove:
             if res == None:
               return None
             return not res
-          elif cmd in "#/^": # Filter commands
+          elif cmd in "#/^?": # Filter commands
             return None
           else:
             if self.debug: print(f"*** match_one(0) cmd unknown {cmd}{arg}")
             return False
         return True
 
+      # match_one_exp()
       conditions = exp.split(";")
       for cond in conditions:
         if self.debug: print(f"*** match_one() condition {cond}")
@@ -114,6 +138,7 @@ class Trove:
       if self.debug: print(f"*** match_one() True: all conditions matched")
       return True
 
+    # expand_match()
     for e in self.expansions:
       if self.debug: print(f"*** expand_match() testing {e} vs. {message if lineno else message.get('type','')}")
       if match_one_exp(e, message):
@@ -254,6 +279,8 @@ class Trove:
         sys.exit()
       elif opt in ("-d", "--debug"):
         self.debug = True
+      elif opt in ("-f", "--filter"):
+        self.add_filter(arg)
       elif opt in ("-e", "--expand"):
         self.add_expansion(arg)
       elif opt in ("-v", "--verbose"):
@@ -268,6 +295,21 @@ class Trove:
       sys.exit(2)
     for trace_file_name in trace_files:
       self.print_trace_overview(trace_file_name)
+
+    def quoted_if_needed(wordlist):
+      outwords = []
+      for word in wordlist:
+        quote = False
+        for letter in '!@#$%&*()<>|':
+          if letter in word:
+            quote = True
+        if quote:
+          outwords += [f"'{word}'"]
+        else:
+          outwords += [word]
+      return outwords
+
+    print(f'\nGenerated using\n{" ".join(quoted_if_needed(sys_argv))}')
 
 if ( __name__ == "__main__"):
   Trove().run_command_line()
