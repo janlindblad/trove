@@ -14,6 +14,7 @@ class Trove:
     self.expansions = []
     self.filters = []
     self.debug = False
+    self.stats = {}
 
   def add_expansion(self, expr):
     self.expansions += [expr]
@@ -147,10 +148,12 @@ class Trove:
     if self.debug: print(f"*** expand_match() True")
     return False
 
-  def print_trace_overview(self, trace_file_name):
+  def print_trace_overview(self, trace_file_name, use_bytes=False):
     with open(trace_file_name, "r") as f:
       trace_text = f.read()
       overview = self.generate_trace_overview(trace_text)
+    sep_len = '+' if not use_bytes else ' '
+    sep_time = ' ' if not use_bytes else 'B '
     for mnum,m in enumerate(overview):
       mtype = m.get('type','')
       if m.get('unparsed'): mtype = 'UNPARSED ' + mtype
@@ -158,12 +161,45 @@ class Trove:
       if m.get('timeout'): mtype = 'TIMEOUT ' + mtype
       if m.get('close'): mtype = 'CLOSED ' + mtype
       if m.get('eof'): mtype = 'EOF ' + mtype
-      print(f"""{mnum:3} {m['line-start']:4}+{m['length']:>5} {m['time']} {m.get('direction')} {m.get('message-id','')} {mtype}""")
+      length = m['length'] if not use_bytes else m['bytes']
+      print(f"""{mnum:3} {m['line-start']:4}{sep_len}{length:>5}{sep_time}{m['time']} {m.get('direction')} {m.get('message-id','')} {mtype}""")
       if self.expand_match(m):
         for lineno,line in enumerate(m.get('body',[]),1):
           if self.expand_match(line,lineno=lineno):
             print(f"""       {lineno:10}:  {line}""")
 
+  def print_stats(self, keys, use_bytes=False):
+    #FIXME: use use_bytes
+    def clean_message_type(mtype):
+      mtype = mtype.strip()
+      mtype = mtype.split(" ")[0]
+      if mtype[0] == '<':
+        mtype = mtype[1:]
+      if mtype[-1] == '>':
+        mtype = mtype[:-1]
+      if mtype[-1] == '/':
+        mtype = mtype[:-1]
+      return mtype
+    print(f"\nStats for {', '.join(keys)}:")
+    total_count = 0
+    total_length = 0
+    total_bytes = 0
+    for key in self.stats.keys():
+      nice_key = clean_message_type(key)
+      if nice_key in keys or 'all' in keys:
+        stat = self.stats[key]
+        total_count += stat['count']
+        total_length += stat['length']
+        total_bytes += stat['bytes']
+    for key in self.stats.keys():
+      nice_key = clean_message_type(key)
+      if nice_key in keys or 'all' in keys:
+        stat = self.stats[key]
+        print(f"{stat['count']} ({100.*stat['count']/total_count:2.1f}%) {key.strip()} messages"
+        f" with total length {stat['length']} ({100.*stat['length']/total_length:2.1f}%) ppXML lines"
+        f" {stat['bytes']} ({100.*stat['bytes']/total_bytes:2.1f}%) bytes")
+    print(f"Total of {total_count} messages with total length {total_length} ppXML lines"
+      f" {total_bytes} bytes")
 
   def generate_trace_overview(self, trace_text):
     overview = []
@@ -172,10 +208,21 @@ class Trove:
     for lineno,line in enumerate(trace_text.split('\n'),1):
       if line.startswith(Trove.outmarker) or line.startswith(Trove.inmarker):
         summary = self.generate_message_summary(lineno, message)
+        if summary:
+          if 'type' in summary:
+            stype = summary['type']
+            if stype not in self.stats: self.stats[stype] = {'count':0,'length':0,'bytes':0}
+            self.stats[stype] = {
+              'count': self.stats[stype]['count'] + 1,
+              'length':self.stats[stype]['length'] + summary['length'],
+              'bytes':self.stats[stype]['bytes'] + summary['bytes']
+            }
         message = self.parse_message_header(lineno, line)
       else:
         message['body'] = message.get('body',[])
+        message['bytes'] = message.get('bytes',0)
         message['body'].append(line)
+        message['bytes'] += len(line)
       if summary: 
         overview += [summary]
         summary = None
@@ -186,7 +233,7 @@ class Trove:
     #<<<<in 30-Jun-2021::11:47:04.293 user: tsdn/95 thandle 1912 hostname tsdn-cicd device PE2
     #>>>>out 30-Jun-2021::15:21:44.988 user: tsdn/7472 thandle 47447 hostname tsdn-cicd device PE2 session-id=1059273927
     #>>>>out 30-Jun-2021::15:21:44.989 user: tsdn/7472 thandle 47447 hostname tsdn-cicd device PE2 session-id=1059273927 NCS close
-    hdr = {'line-start': lineno}
+    hdr = {'line-start': lineno, 'bytes':len(line)}
     words = line.split(' ')
     if words[0] == Trove.outmarker:
       hdr['direction'] = '-->'
@@ -266,10 +313,12 @@ class Trove:
       print(f'{sys_argv[0]} netconf-device.trace...')
     trace_files = []
     verbosity = 0
+    stats = []
+    use_bytes = False
     debug = False
     try:
-      opts, args = getopt.getopt(sys_argv[1:],"hdve:",
-        ["help", "debug=", "verbose", "expand="])
+      opts, args = getopt.getopt(sys_argv[1:],"hdbvs:e:",
+        ["help", "debug=", "verbose", "expand=", "stats=", "bytes"])
     except getopt.GetoptError:
       usage(sys_argv)
       sys.exit(2)
@@ -285,6 +334,10 @@ class Trove:
         self.add_expansion(arg)
       elif opt in ("-v", "--verbose"):
         verbosity += 1
+      elif opt in ("-s", "--stats"):
+        stats.append(arg)
+      elif opt in ("-b", "--bytes"):
+        use_bytes = True
       else:
         Logger.fatal(f'Unknown option "{opt}".')
         sys.exit(2)
@@ -294,7 +347,7 @@ class Trove:
       usage(sys_argv)
       sys.exit(2)
     for trace_file_name in trace_files:
-      self.print_trace_overview(trace_file_name)
+      self.print_trace_overview(trace_file_name, use_bytes)
 
     def quoted_if_needed(wordlist):
       outwords = []
@@ -308,6 +361,9 @@ class Trove:
         else:
           outwords += [word]
       return outwords
+
+    if stats:
+      self.print_stats(stats)
 
     print(f'\nGenerated using\n{" ".join(quoted_if_needed(sys_argv))}')
 
