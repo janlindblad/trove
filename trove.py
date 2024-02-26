@@ -264,6 +264,9 @@ class Trove:
       elif word.startswith('session-id='):
         session_id = word.split('=')[1]
         hdr['session-id'] = session_id
+      elif word.startswith('trace-id='):
+        trace_id = word.split('=')[1]
+        hdr['trace-id'] = trace_id
       elif word == 'NCS':
         if words[num+1] == 'close':
           skip_args = 1
@@ -304,8 +307,14 @@ class Trove:
         main_op = True
         continue
       if main_op and bodyline.strip().startswith("<"):
-        message['type'] = bodyline
+        message['type'] = bodyline[:80]
+        if '>' in message['type']:
+          message['type'] = message['type'][:message['type'].find('>')+1]
+        else:
+          message['type'] += '...'
         main_op = False
+    if 'type' not in message:
+      return None
     return message
 
   def run_command_line(self, sys_argv=sys.argv):
